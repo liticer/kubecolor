@@ -51,13 +51,13 @@ func (p *LogsPrinter) Print(r io.Reader, w io.Writer) {
 		case logscan.KindSeverityTrace:
 			lineBuffer.WriteString(p.Theme.Logs.Severity.Trace.Render(token.Text))
 		case logscan.KindSeverityDebug:
-			lineBuffer.WriteString(p.Theme.Logs.Severity.Debug.Render(token.Text))
+			lineBuffer.WriteString(p.Theme.Logs.Severity.Info.Render(token.Text))
 		case logscan.KindSeverityInfo:
 			lineBuffer.WriteString(p.Theme.Logs.Severity.Info.Render(token.Text))
 		case logscan.KindSeverityWarn:
 			lineBuffer.WriteString(p.Theme.Logs.Severity.Warn.Render(token.Text))
 		case logscan.KindSeverityError:
-			lineBuffer.WriteString(p.Theme.Logs.Severity.Error.Render(token.Text))
+			lineBuffer.WriteString(p.Theme.Logs.Severity.Warn.Render(token.Text))
 		case logscan.KindSeverityFatal:
 			lineBuffer.WriteString(p.Theme.Logs.Severity.Fatal.Render(token.Text))
 		case logscan.KindSeverityPanic:

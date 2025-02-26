@@ -16,6 +16,16 @@ import (
 //	Lmmdd hh:mm:ss.uuuuuu threadid file:line] msg...
 var klogLevelAndDateRegex = regexp.MustCompile(`^([IWEF])(\d{4} \d\d:\d\d:\d\d\.\d+)(\s*\d+\s*)([\w\._]+:\d+)\]`)
 
+// llogLevelAndDateRegex1 is for parsing liticer log line 1
+//
+// LmmddThh:mm:ss file:line | name | msg...
+var llogLevelAndDateRegex1 = regexp.MustCompile(`^([A-Z1-9]{2})(\d{4}T\d{2}:\d{2}:\d{2})\s+([\w/.-@]+:\d+)\s*\|\s*([^|]+)\s*\|`)
+
+// llogLevelAndDateRegex2 is for parsing liticer log line 2
+//
+// LmmddThh:mm:ss file:line | name | msg...
+var llogLevelAndDateRegex2 = regexp.MustCompile(`^([A-Z1-9]{2})(\d{4}T\d{2}:\d{2}:\d{2})\s+([\w/.-@]+:\d+)\s*\|`)
+
 // dateRegex is for parsing dates in various formats. E.g:
 //
 //	2024-08-03T19:57:19.446242
@@ -199,7 +209,74 @@ func (s *Scanner) scan(rest []byte) int {
 		s.pushToken(KindDate, string(date))
 		s.pushToken(KindUnknown, string(threadIDWithPadding))
 		s.pushToken(KindSourceRef, string(sourceRef))
-		s.pushToken(KindParenthases, "]")
+		s.pushToken(KindParenthases, " |")
+		return len(fullMatch)
+	}
+
+	// llogLevelAndDateRegex1 is for parsing liticer log line 1
+	//
+	// LmmddThh:mm:ss file:line | name | msg...
+	if llogMatches := llogLevelAndDateRegex1.FindSubmatch(rest); llogMatches != nil {
+		fullMatch := llogMatches[0]
+		severity := llogMatches[1]
+		date := llogMatches[2]
+		sourceRef := llogMatches[3]
+		name := llogMatches[4]
+
+		var severityKind Kind
+		switch firstRune {
+		case 'D', 'L':
+			severityKind = KindSeverityDebug
+		case 'I':
+			severityKind = KindSeverityInfo
+		case 'W':
+			severityKind = KindSeverityWarn
+		case 'E':
+			severityKind = KindSeverityError
+		case 'F':
+			severityKind = KindSeverityFatal
+		}
+
+		s.hasFoundSeverity = true
+		s.pushToken(severityKind, string(severity))
+		s.pushToken(KindDate, string(date))
+		s.pushToken(KindParenthases, " ")
+		s.pushToken(KindSourceRef, string(sourceRef))
+		s.pushToken(KindParenthases, " | ")
+		s.pushToken(KindQuote, string(name))
+		s.pushToken(KindParenthases, "|")
+		return len(fullMatch)
+	}
+
+	// llogLevelAndDateRegex1 is for parsing liticer log line 2
+	//
+	// LmmddThh:mm:ss file:line | name | msg...
+	if llogMatches := llogLevelAndDateRegex2.FindSubmatch(rest); llogMatches != nil {
+		fullMatch := llogMatches[0]
+		severity := llogMatches[1]
+		date := llogMatches[2]
+		sourceRef := llogMatches[3]
+
+		var severityKind Kind
+		switch firstRune {
+		case 'D', 'L':
+			severityKind = KindSeverityDebug
+		case 'I':
+			severityKind = KindSeverityInfo
+		case 'W':
+			severityKind = KindSeverityWarn
+		case 'E':
+			severityKind = KindSeverityError
+		case 'F':
+			severityKind = KindSeverityFatal
+		}
+
+		s.hasFoundSeverity = true
+		s.pushToken(severityKind, string(severity))
+		s.pushToken(KindDate, string(date))
+		s.pushToken(KindParenthases, " ")
+		s.pushToken(KindSourceRef, string(sourceRef))
+		s.pushToken(KindParenthases, " | ")
 		return len(fullMatch)
 	}
 
@@ -451,7 +528,8 @@ func (s *Scanner) scanJSON(rest []byte) int {
 			}
 
 			// ["value1","value2"]
-			//  ^^^^^^^^
+			// ^^^^^^^^
+			//
 			itemSize := s.scanJSON(rest[jsonArraySize:])
 			if itemSize == 0 {
 				return jsonArraySize
