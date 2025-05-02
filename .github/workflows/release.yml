@@ -1,58 +1,255 @@
-name: goreleaser
+name: release
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
+  cancel-in-progress: true
 
 on:
-  push:
-    tags:
-      - 'v*'
+  # Only run when triggered manually.
+  #
+  # Release process:
+  # 1. you create a draft release
+  # 2. you may edit the draft how many times you want, no automation has kicked in yet
+  # 3. you manually trigger this workflow
+  # 4. this workflow builds and publishes the release (unmarks it as draft)
+  #
+  # This allows us to have build errors on step 3. without us having to
+  # roll back a release or artificially bump the version just because of
+  # a CI/CD issue.
+  workflow_dispatch:
+    inputs:
+      tag-name:
+        description: GitHub release tag name of the draft release you want to publish.
+        required: true
+        type: string
+      environment:
+        description: GitHub Action environment to publish to.
+        default: production
+        type: environment
+      dry-run:
+        description: Dry-run. When enabled, will only build and upload the assets to the release, but won't publish it
+        type: boolean
+        default: false
+
+permissions:
+  # Required to upload binaries to GitHub releases
+  contents: write
+  # Required to push Docker image to ghcr.io/kubecolor/kubecolor
+  packages: write
+  # Required for signing (sigstore)
+  attestations: write
+  # Required for using GitHub IdP (when signing)
+  id-token: write
 
 jobs:
-  goreleaser:
+  build:
     runs-on: ubuntu-latest
     steps:
+      - name: Validate tag name format
+        run: |
+          if [[ ! "${{ inputs.tag-name }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.\-]+)?$ ]]; then
+            echo "Invalid tag name format. Must be in the form v1.2.3 or v1.2.3-foobar.1"
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - run: git fetch --force --tags
+
+      - name: Create tag
+        env:
+          GIT_AUTHOR_EMAIL: noreply@github.com
+          GIT_AUTHOR_NAME: kubecolor automation
+          GIT_COMMITTER_EMAIL: noreply@github.com
+          GIT_COMMITTER_NAME: kubecolor automation
+          TAG_NAME: ${{ inputs.tag-name }}
+        run: |
+          git tag -d "$TAG_NAME" || true
+          git tag "$TAG_NAME" -m "$TAG_NAME"
+          echo "Tagged $TAG_NAME"
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
-          distribution: goreleaser
-          version: latest
-          args: release --clean
+          version: "~> v2"
+          # Using `--skip=publish` as we need some further processing
+          # like creating deb/rpm repos & attestations, which are done
+          # in later steps
+          args: release --clean --skip=publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GLOBAL_GITHUB_TOKEN: ${{ secrets.GLOBAL_GITHUB_TOKEN }}
           FORCE_COLOR: "true"
+
+      - name: Upload goreleaser binaries as artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/*.rpm
+            dist/*.deb
+            dist/metadata.json
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Checkout documentation site
+        uses: actions/checkout@v4
+        with:
+          repository: kubecolor/packages
+          ref: gh-pages
+          path: packages
+          fetch-depth: 0
+          ssh-key: ${{ secrets.PACKAGES_DEPLOY_KEY }}
+
+      - name: Set up GPG (only for production)
+        if: inputs.environment == 'production'
+        env:
+          PACKAGES_GPG_PUBKEY: ${{ secrets.PACKAGES_GPG_PUBKEY }}
+          PACKAGES_GPG_KEY: ${{ secrets.PACKAGES_GPG_KEY }}
+        run: |
+          gpg --import --no-tty --batch --yes <<<"$PACKAGES_GPG_PUBKEY"
+          gpg --import --no-tty --batch --yes <<<"$PACKAGES_GPG_KEY"
+
+      - name: Prepare release assets
+        run: |
+          shopt -s failglob
+          rm -rfv dist
+          mkdir -pv dist
+          mv -v artifacts/* dist/
+
+      - name: Sign RPMs (only for production)
+        if: inputs.environment == 'production'
+        run: assets/packaging/rpmsign-all.sh
+
+      # Make sure to run rpmsign before doing attestations as rpmsign modifies the .rpm files
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
+        with:
+          subject-path: "dist/kubecolor_*"
+
+      - name: Run createrepo-pkg.sh
+        run: assets/packaging/createrepo-pkg.sh
+
+      - name: Sign RPM repomd.xml (only for production)
+        if: inputs.environment == 'production'
+        run: assets/packaging/rpm-repomd-sign.sh
+
+      - name: Disable deb signing (only when not production)
+        if: inputs.environment != 'production'
+        run: sed -i.bak '/^SignWith:/d' assets/packaging/distributions
+
+      - name: Run reprepro-pkg.sh
+        run: assets/packaging/reprepro-pkg.sh
+
+      - name: Run version.sh
+        run: assets/packaging/version.sh
+
+      - name: Upload assets to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ inputs.tag-name }}
+        run: |
+          pushd dist
+          sha256sum kubecolor_* > checksums.txt
+          popd
+          assets/packaging/gh-label-assets.sh dist/checksums.txt dist/kubecolor_* \
+            | xargs gh release upload "${{ inputs.tag-name }}" --clobber --
+
+      - name: Publish site
+        env:
+          DO_PUBLISH: ${{ !contains(inputs.tag-name, '-') && !inputs.dry-run }}
+          GIT_AUTHOR_EMAIL: noreply@github.com
+          GIT_AUTHOR_NAME: kubecolor automation
+          GIT_COMMITTER_EMAIL: noreply@github.com
+          GIT_COMMITTER_NAME: kubecolor automation
+          TAG_NAME: ${{ inputs.tag-name }}
+        working-directory: ./packages
+        run: |
+          git add .
+          git commit -m "Add rpm and deb packages for $TAG_NAME"
+          if [ "$DO_PUBLISH" = "true" ]; then
+            git push
+          else
+            git log --oneline @{upstream}..
+            git diff --name-status @{upstream}..
+          fi
+
+      - name: Publish release
+        if: "!inputs.dry-run"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release edit "${{ inputs.tag-name }}" --draft=false
+
   homebrew:
     name: Bump Homebrew formula
     # Skip this job in case of git pushes to prerelease tags
-    if: ${{ github.event_name != 'push' || !contains(github.ref, '-') }}
+    if: "!contains(inputs.tag-name, '-') && !inputs.dry-run"
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    needs: goreleaser
+    needs: release
     steps:
-      - name: Extract version
-        id: extract-version
-        # Strip a string prefix from the git tag name:
-        run: |
-          echo "tag-name=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-
       - uses: mislav/bump-homebrew-formula-action@v3
         with:
           formula-name: kubecolor
           formula-path: Formula/k/kubecolor.rb
           homebrew-tap: Homebrew/homebrew-core
           base-branch: master
-          download-url: https://github.com/kubecolor/kubecolor/archive/refs/tags/${{ steps.extract-version.outputs.tag-name }}.tar.gz
+          download-url: https://github.com/kubecolor/kubecolor/archive/refs/tags/${{ inputs.tag-name }}.tar.gz
           commit-message: |
             {{formulaName}} {{version}}
 
             Created by https://github.com/mislav/bump-homebrew-formula-action
         env:
           COMMITTER_TOKEN: ${{ secrets.GLOBAL_GITHUB_TOKEN }}
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: release
+    steps:
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Check out the repo
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ !inputs.dry-run }}
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ inputs.tag_name }}
+            ghcr.io/${{ github.repository }}:latest
+          build-args: VERSION=${{ inputs.tag_name }}
