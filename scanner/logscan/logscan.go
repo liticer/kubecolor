@@ -14,15 +14,19 @@ import (
 // klogLevelAndDateRegex is for parsing Kubernetes klog line: https://github.com/kubernetes/klog/blob/75663bb798999a49e3e4c0f2375ed5cca8164194/klog.go#L637-L650
 //
 //	Lmmdd hh:mm:ss.uuuuuu threadid file:line] msg...
-var klogLevelAndDateRegex = regexp.MustCompile(`^([IWEF])(\d{4} \d\d:\d\d:\d\d\.\d+)(\s*\d+\s*)([\w\._]+:\d+)\]`)
+var klogLevelAndDateRegex = regexp.MustCompile(`^([IWEF])(\d{4} \d\d:\d\d:\d\d\.\d+)(\s*\d+\s*)([\w\._-]+:\d+)\]`)
 
 // dateRegex is for parsing dates in various formats. E.g:
 //
 //	2024-08-03T19:57:19.446242
+//	2024-08-03T19:57:19,446242
 //	2024-08-03 20:04:28.614 GMT
+//	2024-08-03 20:04:28,614 GMT
 //	03 Aug 2024 20:04:28.614 GMT
+//	03 Aug 2024 20:04:28,614 GMT
 //	Aug/03/2024:20:04:28.614 +02:00
-var dateRegex = regexp.MustCompile(`^\d{4}-\d\d-\d\dT\d\d:\d\d(:\d\d(\.\d+)?)?(Z|[+-]\d\d:\d\d|[+-]\d{4})?\b|^(\d{4}-\d\d-\d\d|\d\d ([a-zA-Z][a-z]+) \d{4}|\d\d/([a-zA-Z][a-z]+)/\d{4})[ :]\d\d:\d\d(:\d\d(\.\d+)?)?( ?(GMT|UTC|[+-]\d\d:\d\d|[+-]\d\d\d\d))?\b`)
+//	Aug/03/2024:20:04:28,614 +02:00
+var dateRegex = regexp.MustCompile(`^\d{4}-\d\d-\d\dT\d\d:\d\d(:\d\d([\.,]\d+)?)?(Z|[+-]\d\d:\d\d|[+-]\d{4})?\b|^(\d{4}-\d\d-\d\d|\d\d ([a-zA-Z][a-z]+) \d{4}|\d\d/([a-zA-Z][a-z]+)/\d{4})[ :]\d\d:\d\d(:\d\d([\.,]\d+)?)?( ?(GMT|UTC|[+-]\d\d:\d\d|[+-]\d\d\d\d))?\b`)
 
 // guidRegex is for matching on GUIDs and UUIDs. E.g:
 //
